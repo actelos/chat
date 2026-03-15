@@ -1,121 +1,176 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useMemo, useState } from "react";
+import { FEATURED_MODELS } from "@/lib/models";
+
+import { SendHorizontal } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { streamChat, type ChatMessage } from "@/lib/chat";
+import { ChatMarkdown } from "@/components/chat-markdown";
+
+type UIMessage = ChatMessage & {
+  id: string;
+};
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [messages, setMessages] = useState<UIMessage[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>(FEATURED_MODELS[0]);
+  const [customModel, setCustomModel] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const hasMessages = useMemo(() => messages.length > 0, [messages.length]);
+  const activeModel = useMemo(() => {
+    const typedModel = customModel.trim();
+
+    return typedModel.length > 0 ? typedModel : selectedModel;
+  }, [customModel, selectedModel]);
+
+  async function handleSubmit() {
+    const content = prompt.trim();
+
+    if (!content || isStreaming) {
+      return;
+    }
+
+    const userMessage: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content,
+    };
+
+    const assistantMessageId = crypto.randomUUID();
+    const nextMessages = [...messages, userMessage];
+
+    setPrompt("");
+    setIsStreaming(true);
+    setMessages([
+      ...nextMessages,
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+      },
+    ]);
+
+    try {
+      await streamChat({
+        model: activeModel,
+        messages: nextMessages.map(({ role, content: messageContent }) => ({
+          role,
+          content: messageContent,
+        })),
+        onToken: (token) => {
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    content: message.content + token,
+                  }
+                : message,
+            ),
+          );
+        },
+      });
+    } catch (error) {
+      const failureMessage =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to get a response. Please verify your API key and selected model.";
+
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.id === assistantMessageId
+            ? {
+                ...message,
+                content: `Error: ${failureMessage}`,
+              }
+            : message,
+        ),
+      );
+    } finally {
+      setIsStreaming(false);
+    }
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
+    <main className="mx-auto min-h-dvh max-w-4xl bg-background px-4 pb-44 pt-6 md:px-6 md:pt-10">
+      <section className="space-y-4">
+        {messages.map((message) => (
+          <article
+            key={message.id}
+            className={
+              message.role === "user"
+                ? "ml-auto w-fit max-w-[85%] border border-border bg-secondary px-3 py-2"
+                : "w-full"
+            }
+          >
+            {message.role === "assistant" ? (
+              <ChatMarkdown content={message.content || (isStreaming ? "…" : "")} />
+            ) : (
+              <p className="whitespace-pre-wrap">{message.content}</p>
+            )}
+          </article>
+        ))}
       </section>
+      <section className="fixed inset-x-0 bottom-0 bg-background/95 px-4 py-4 backdrop-blur md:px-6">
+        <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
+          <div className="flex items-end gap-2">
+            <Textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Write your prompt..."
+              className="min-h-24"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleSubmit();
+                }
+              }}
+              disabled={isStreaming}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-1 flex-col gap-2 md:flex-row">
+              <Select
+                id="model"
+                className="max-w-sm"
+                value={selectedModel}
+                onChange={(event) => setSelectedModel(event.target.value)}
+                disabled={isStreaming}
+              >
+                {FEATURED_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </Select>
+              <Input
+                value={customModel}
+                onChange={(event) => setCustomModel(event.target.value)}
+                placeholder="Or type any OpenRouter model id..."
+                disabled={isStreaming}
+              />
+            </div>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
+            <Button
+              type="button"
+              size="icon"
+              onClick={() => {
+                void handleSubmit();
+              }}
+              disabled={isStreaming || prompt.trim().length === 0 || activeModel.length === 0}
+              aria-label="Send"
+            >
+              <SendHorizontal className="size-4" />
+            </Button>
+          </div>
         </div>
       </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+    </main>
+  );
 }
 
-export default App
+export default App;
