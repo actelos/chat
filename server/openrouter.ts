@@ -13,9 +13,10 @@ type OpenRouterChatProxyPluginOptions = {
 };
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
-
-const SYSTEM_PROMPT =
-  "You are a concise, practical coding assistant. Prefer clear steps and short examples. If unsure, say so and suggest a safe next step.";
+const SYSTEM_PROMPT = `
+  You are a concise, practical coding assistant. Prefer clear steps and short
+  examples. If unsure, say so and suggest a safe next step.
+`;
 
 function isChatMessage(value: unknown): value is ChatMessage {
   if (!value || typeof value !== "object") {
@@ -206,9 +207,7 @@ async function handleChatRequest(
           if (typeof token === "string" && token.length > 0) {
             res.write(token);
           }
-        } catch {
-          // Ignore non-JSON stream frames.
-        }
+        } catch {}
       }
     }
 
