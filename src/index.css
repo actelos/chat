@@ -118,9 +118,21 @@
 }
 
 @layer base {
+  ::-webkit-scrollbar {
+    width: 8px;
+    @apply bg-background;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-foreground;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-primary;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
   }

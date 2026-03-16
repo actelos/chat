@@ -207,7 +207,9 @@ async function handleChatRequest(
           if (typeof token === "string" && token.length > 0) {
             res.write(token);
           }
-        } catch {}
+        } catch {
+          continue;
+        }
       }
     }
 
