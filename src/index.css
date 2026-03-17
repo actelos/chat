@@ -120,6 +120,7 @@
 @layer base {
   ::-webkit-scrollbar {
     width: 8px;
+    height: 8px;
     @apply bg-background;
   }
   ::-webkit-scrollbar-thumb {
@@ -138,5 +139,26 @@
   }
   html {
     @apply font-mono;
+  }
+}
+
+.process-card-border {
+  border-color: var(--process-border-color, var(--border));
+  transition: border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.process-card-border-animated {
+  animation: process-card-border-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes process-card-border-pulse {
+  0%,
+  100% {
+    border-color: var(--process-border-color, var(--border));
+    box-shadow: 0 0 0 1px var(--process-border-color, var(--border));
+  }
+  50% {
+    border-color: var(--border);
+    box-shadow: 0 0 0 0 transparent;
   }
 }

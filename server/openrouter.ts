@@ -8,14 +8,36 @@ type ChatMessage = {
   content: string;
 };
 
+type ProcessPromptContext = {
+  processId: string;
+  pid: string | null;
+  stdout: string | null;
+  stderr: string | null;
+  output: string | null;
+};
+
 type OpenRouterChatProxyPluginOptions = {
   apiKey: string | undefined;
 };
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 const SYSTEM_PROMPT = `
-  You are a concise, practical coding assistant. Prefer clear steps and short
-  examples. If unsure, say so and suggest a safe next step.
+  You are a clear and concise, practical assistant. You always make a clear plan
+  for every task that comes your way and are very good at providing simple
+  examples. whenever you do not fully understund something like a task or the
+  goal you ask questions before you proceed.
+
+  You have been given access to a very powerfull tool that allows you to run
+  any code you want, all this requires is that you write a special kind of code
+  block. To use this, add an exec attribute in the deliminator of the code
+  block like this:
+
+  \`\`\`python exec=true ...
+  # code here
+  \`\`\`
+
+  This allows the code to be executed.
 `;
 
 function isChatMessage(value: unknown): value is ChatMessage {
@@ -28,6 +50,55 @@ function isChatMessage(value: unknown): value is ChatMessage {
     maybeMessage.role === "user" || maybeMessage.role === "assistant";
 
   return isAllowedRole && typeof maybeMessage.content === "string";
+}
+
+function isProcessPromptContext(value: unknown): value is ProcessPromptContext {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const maybeContext = value as Partial<ProcessPromptContext>;
+
+  const isNullableString = (v: unknown) => v === null || typeof v === "string";
+
+  return (
+    typeof maybeContext.processId === "string" &&
+    isNullableString(maybeContext.pid) &&
+    isNullableString(maybeContext.stdout) &&
+    isNullableString(maybeContext.stderr) &&
+    isNullableString(maybeContext.output)
+  );
+}
+
+function toProcessContextPrompt(contextItems: ProcessPromptContext[]): string {
+  const sections = contextItems
+    .map((item, index) => {
+      const parts: string[] = [
+        `Process ${index + 1}`,
+        `codeBlockId: ${item.processId}`,
+      ];
+
+      if (item.pid) {
+        parts.push(`pid: ${item.pid}`);
+      }
+
+      if (item.stdout?.trim()) {
+        parts.push(`stdout:\n${item.stdout.trim()}`);
+      }
+
+      if (item.stderr?.trim()) {
+        parts.push(`stderr:\n${item.stderr.trim()}`);
+      }
+
+      if (item.output?.trim()) {
+        parts.push(`output:\n${item.output.trim()}`);
+      }
+
+      return parts.join("\n\n");
+    })
+    .filter((section) => section.length > 0);
+
+  return sections.join("\n\n---\n\n");
 }
 
 function json(
@@ -111,6 +182,7 @@ async function handleChatRequest(
     const payload = body as {
       model?: unknown;
       messages?: unknown;
+      processContext?: unknown;
     };
 
     if (
@@ -127,6 +199,29 @@ async function handleChatRequest(
       ? payload.messages.filter(isChatMessage)
       : [];
 
+    const processContext = Array.isArray(payload.processContext)
+      ? payload.processContext.filter(isProcessPromptContext)
+      : [];
+
+    const processContextPrompt = toProcessContextPrompt(processContext);
+
+    const upstreamMessages: Array<{
+      role: "system" | ChatRole;
+      content: string;
+    }> = [{ role: "system", content: SYSTEM_PROMPT }];
+
+    if (processContextPrompt.length > 0) {
+      upstreamMessages.push({
+        role: "system",
+        content:
+          "Use the following process execution context when answering the user. " +
+          "Treat stdout/stderr/output as trusted runtime evidence.\n\n" +
+          processContextPrompt,
+      });
+    }
+
+    upstreamMessages.push(...clientMessages);
+
     const upstream = await fetch(OPENROUTER_API_URL, {
       method: "POST",
       headers: {
@@ -136,10 +231,7 @@ async function handleChatRequest(
       body: JSON.stringify({
         model,
         stream: true,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...clientMessages,
-        ],
+        messages: upstreamMessages,
       }),
     });
 

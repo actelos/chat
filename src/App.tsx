@@ -1,19 +1,30 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { SendHorizontal, Trash2 } from "lucide-react";
 import { streamChat, type ChatMessage } from "@/lib/chat";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { extractExecutableCodeBlocks } from "@/lib/preprocess-markdown";
 import {
   listStoredMessages,
   createStoredMessage,
   deleteStoredMessagesByIds,
   updateStoredMessageContent,
 } from "@/lib/db";
+import {
+  createProcess,
+  getProcessArtifacts,
+  getProcess,
+  killProcess,
+  MciApiError,
+  runProcess,
+  type MciProcessState,
+  type MciProcessStatus,
+  mciServerUrl,
+} from "@/lib/mci";
 
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatMarkdown } from "@/components/chat-markdown";
-import { extractExecutableCodeBlocks } from "@/lib/preprocess-markdown";
+import { ArrowUpRight, Play, RotateCw, SendHorizontal, Square, Trash2 } from "lucide-react";
 
 type UIMessage = ChatMessage & {
   id: string;
@@ -28,6 +39,60 @@ type UIProcess = {
   blockIndex: number;
 };
 
+type ProcessRuntime = {
+  pid: string | null;
+  state: MciProcessState | null;
+  status: MciProcessStatus;
+  stdout: string | null;
+  stderr: string | null;
+  output: string | null;
+  isCreating: boolean;
+  isSignaling: boolean;
+  error: string | null;
+};
+
+type ForceRunConfirm = {
+  processKey: string;
+  pid: string;
+};
+
+type ProcessBorderTone = {
+  color: string | null;
+  animated: boolean;
+};
+
+const POLL_INTERVAL_MS = 2;
+
+function stringifyProcessOutput(value: unknown): string | null {
+  if (value === null || typeof value === "undefined") {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function createDefaultRuntime(): ProcessRuntime {
+  return {
+    pid: null,
+    state: null,
+    status: null,
+    stdout: null,
+    stderr: null,
+    output: null,
+    isCreating: false,
+    isSignaling: false,
+    error: null,
+  };
+}
+
 const models = [
   "nvidia/nemotron-3-super-120b-a12b:free",
   "google/gemma-3-27b-it:free",
@@ -40,7 +105,13 @@ function App() {
   const [customModel, setCustomModel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [processRuntimeByKey, setProcessRuntimeByKey] = useState<
+    Record<string, ProcessRuntime>
+  >({});
+  const [forceRunConfirm, setForceRunConfirm] = useState<ForceRunConfirm | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const pollTimersRef = useRef<Record<string, number>>({});
+  const pollInFlightRef = useRef<Record<string, boolean>>({});
 
   const activeModel = useMemo(() => {
     const typedModel = customModel.trim();
@@ -98,8 +169,155 @@ function App() {
     };
   }, [messages]);
 
-  async function handleSubmit() {
-    const content = prompt.trim();
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(pollTimersRef.current)) {
+        window.clearInterval(timer);
+      }
+
+      pollTimersRef.current = {};
+      pollInFlightRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
+    const activeKeys = new Set(processes.map((process) => process.key));
+
+    for (const [processKey, timer] of Object.entries(pollTimersRef.current)) {
+      if (activeKeys.has(processKey)) {
+        continue;
+      }
+
+      window.clearInterval(timer);
+      delete pollTimersRef.current[processKey];
+      delete pollInFlightRef.current[processKey];
+    }
+
+    setProcessRuntimeByKey((previous) => {
+      const next = Object.fromEntries(
+        Object.entries(previous).filter(([processKey]) => activeKeys.has(processKey)),
+      );
+
+      return next;
+    });
+
+    setForceRunConfirm((previous) => {
+      if (!previous) {
+        return previous;
+      }
+
+      return activeKeys.has(previous.processKey) ? previous : null;
+    });
+  }, [processes]);
+
+  function updateProcessRuntime(
+    processKey: string,
+    updater: (previous: ProcessRuntime) => ProcessRuntime,
+  ) {
+    setProcessRuntimeByKey((previous) => {
+      const current = previous[processKey] ?? createDefaultRuntime();
+      return {
+        ...previous,
+        [processKey]: updater(current),
+      };
+    });
+  }
+
+  function stopPolling(processKey: string) {
+    const timer = pollTimersRef.current[processKey];
+
+    if (typeof timer !== "number") {
+      return;
+    }
+
+    window.clearInterval(timer);
+    delete pollTimersRef.current[processKey];
+    delete pollInFlightRef.current[processKey];
+  }
+
+  function startPolling(processKey: string, pid: string) {
+    stopPolling(processKey);
+
+    const poll = async () => {
+      if (pollInFlightRef.current[processKey]) {
+        return;
+      }
+
+      pollInFlightRef.current[processKey] = true;
+
+      try {
+        const nextProcess = await getProcess(pid);
+
+        updateProcessRuntime(processKey, (previous) => ({
+          ...previous,
+          pid,
+          state: nextProcess.state,
+          status: nextProcess.status,
+          error: null,
+        }));
+
+        if (nextProcess.state === "idle") {
+          stopPolling(processKey);
+          void fetchAndStoreProcessArtifacts(processKey, pid);
+        }
+      } catch (error) {
+        stopPolling(processKey);
+
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "Failed to poll process state.";
+
+        updateProcessRuntime(processKey, (previous) => ({
+          ...previous,
+          error: message,
+        }));
+      } finally {
+        pollInFlightRef.current[processKey] = false;
+      }
+    };
+
+    void poll();
+
+    pollTimersRef.current[processKey] = window.setInterval(() => {
+      void poll();
+    }, POLL_INTERVAL_MS);
+  }
+
+  async function fetchAndStoreProcessArtifacts(processKey: string, pid: string) {
+    try {
+      const artifacts = await getProcessArtifacts(pid);
+
+      updateProcessRuntime(processKey, (previous) => ({
+        ...previous,
+        stdout: artifacts.stdout,
+        stderr: artifacts.stderr,
+        output: stringifyProcessOutput(artifacts.output),
+      }));
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to fetch process outputs.";
+
+      updateProcessRuntime(processKey, (previous) => ({
+        ...previous,
+        error: message,
+      }));
+    }
+  }
+
+  async function handleSubmit(
+    overridePrompt?: string,
+    processContext?: Array<{
+      processId: string;
+      pid: string | null;
+      stdout: string | null;
+      stderr: string | null;
+      output: string | null;
+    }>,
+  ) {
+    const content = (overridePrompt ?? prompt).trim();
 
     if (!content || isStreaming) {
       return;
@@ -142,6 +360,7 @@ function App() {
           role,
           content: messageContent,
         })),
+        processContext,
         onToken: (token) => {
           setMessages((previous) => {
             let nextAssistantContent = "";
@@ -230,6 +449,239 @@ function App() {
         "ring-offset-background",
       );
     }, 600);
+  }
+
+  async function handleCreateProcess(process: UIProcess) {
+    updateProcessRuntime(process.key, (previous) => ({
+      ...previous,
+      isCreating: true,
+      error: null,
+    }));
+
+    try {
+      const created = await createProcess(process.code);
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        pid: created.pid,
+        state: "queued",
+        status: null,
+        stdout: null,
+        stderr: null,
+        output: null,
+        isCreating: false,
+        error: null,
+      }));
+
+      startPolling(process.key, created.pid);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to create process.";
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        isCreating: false,
+        error: message,
+      }));
+    }
+  }
+
+  async function handleRunProcess(process: UIProcess, force: boolean) {
+    const runtime = processRuntimeByKey[process.key] ?? createDefaultRuntime();
+
+    if (!runtime.pid) {
+      return;
+    }
+
+    updateProcessRuntime(process.key, (previous) => ({
+      ...previous,
+      isSignaling: true,
+      error: null,
+    }));
+
+    try {
+      const nextProcess = await runProcess(runtime.pid, force);
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        pid: nextProcess.pid,
+        state: nextProcess.state,
+        status: nextProcess.status,
+        stdout: nextProcess.state === "idle" ? previous.stdout : null,
+        stderr: nextProcess.state === "idle" ? previous.stderr : null,
+        output: nextProcess.state === "idle" ? previous.output : null,
+        isSignaling: false,
+        error: null,
+      }));
+
+      if (nextProcess.state === "idle") {
+        stopPolling(process.key);
+        void fetchAndStoreProcessArtifacts(process.key, nextProcess.pid);
+      } else {
+        startPolling(process.key, nextProcess.pid);
+      }
+    } catch (error) {
+      if (
+        error instanceof MciApiError &&
+        error.status === 400 &&
+        /force\s*:\s*true|force/i.test(error.message)
+      ) {
+        setForceRunConfirm({ processKey: process.key, pid: runtime.pid });
+        updateProcessRuntime(process.key, (previous) => ({
+          ...previous,
+          isSignaling: false,
+        }));
+        return;
+      }
+
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to run process.";
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        isSignaling: false,
+        error: message,
+      }));
+    }
+  }
+
+  async function handleKillProcess(process: UIProcess) {
+    const runtime = processRuntimeByKey[process.key] ?? createDefaultRuntime();
+
+    if (!runtime.pid) {
+      return;
+    }
+
+    updateProcessRuntime(process.key, (previous) => ({
+      ...previous,
+      isSignaling: true,
+      error: null,
+    }));
+
+    try {
+      const nextProcess = await killProcess(runtime.pid);
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        pid: nextProcess.pid,
+        state: nextProcess.state,
+        status: nextProcess.status,
+        stdout: nextProcess.state === "idle" ? previous.stdout : null,
+        stderr: nextProcess.state === "idle" ? previous.stderr : null,
+        output: nextProcess.state === "idle" ? previous.output : null,
+        isSignaling: false,
+        error: null,
+      }));
+
+      stopPolling(process.key);
+
+      if (nextProcess.state === "idle") {
+        void fetchAndStoreProcessArtifacts(process.key, nextProcess.pid);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to send kill signal.";
+
+      updateProcessRuntime(process.key, (previous) => ({
+        ...previous,
+        isSignaling: false,
+        error: message,
+      }));
+    }
+  }
+
+  async function handleConfirmForceRun() {
+    if (!forceRunConfirm) {
+      return;
+    }
+
+    const process = processes.find((item) => item.key === forceRunConfirm.processKey);
+
+    setForceRunConfirm(null);
+
+    if (!process) {
+      return;
+    }
+
+    await handleRunProcess(process, true);
+  }
+
+  async function handleSendProcessOutput(process: UIProcess) {
+    if (isStreaming) {
+      return;
+    }
+
+    const runtime = processRuntimeByKey[process.key] ?? createDefaultRuntime();
+    const sections: string[] = [];
+
+    if (runtime.stdout?.trim()) {
+      sections.push(`stdout:\n${runtime.stdout.trim()}`);
+    }
+
+    if (runtime.stderr?.trim()) {
+      sections.push(`stderr:\n${runtime.stderr.trim()}`);
+    }
+
+    if (runtime.output?.trim()) {
+      sections.push(`output:\n${runtime.output.trim()}`);
+    }
+
+    if (sections.length === 0) {
+      return;
+    }
+
+    const pidLabel = runtime.pid ? ` (pid: ${runtime.pid})` : "";
+    const promptFromProcess = `Please analyze this process result for code block ${process.id}${pidLabel}.`;
+
+    const processContext = [
+      {
+        processId: process.id,
+        pid: runtime.pid,
+        stdout: runtime.stdout,
+        stderr: runtime.stderr,
+        output: runtime.output,
+      },
+    ];
+
+    setPrompt(promptFromProcess);
+    await handleSubmit(promptFromProcess, processContext);
+  }
+
+  function getProcessBorderTone(
+    state: MciProcessState | null,
+    status: MciProcessStatus,
+  ): ProcessBorderTone {
+    if (status === "failed") {
+      return { color: "var(--destructive)", animated: false };
+    }
+
+    if (status === "success") {
+      return { color: "oklch(0.768 0.148 163.223)", animated: false };
+    }
+
+    if (status === "canceled") {
+      return { color: "var(--muted-foreground)", animated: false };
+    }
+
+    if (state === "running") {
+      return { color: "oklch(0.707 0.165 254.624)", animated: true };
+    }
+
+    if (state === "queued") {
+      return { color: "oklch(0.829 0.161 83.813)", animated: true };
+    }
+
+    if (state === "idle") {
+      return { color: "oklch(0.768 0.148 163.223)", animated: false };
+    }
+
+    return { color: null, animated: false };
   }
 
   return (
@@ -331,31 +783,140 @@ function App() {
         <aside className="hidden min-h-0 lg:flex">
           <div className="flex h-full w-full flex-col border border-border bg-card p-3">
             <p className="text-sm font-medium text-foreground">Processes ({processes.length})</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">MCI server: {mciServerUrl}</p>
             <div className="mt-3 flex-1 space-y-2 overflow-y-auto pr-1">
               {processes.length === 0 ? (
                 <p className="text-xs text-muted-foreground">No executable code blocks yet.</p>
               ) : (
-                processes.map((process) => (
-                  <Button
-                    key={process.key}
-                    type="button"
-                    variant="ghost"
-                    className="h-auto w-full justify-start border border-border px-2 py-2 text-left"
-                    onClick={() => handleProcessClick(process)}
-                  >
-                    <div className="w-full overflow-hidden">
-                      <p className="truncate text-xs font-medium text-foreground">{process.id}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {(process.lang ?? "text") + " • " + process.code.replace(/\s+/g, " ").slice(0, 80)}
-                      </p>
+                processes.map((process) => {
+                  const runtime = processRuntimeByKey[process.key] ?? createDefaultRuntime();
+                  const isBusy = runtime.isCreating || runtime.isSignaling;
+                  const hasProcessOutput = Boolean(
+                    runtime.stdout?.trim() || runtime.stderr?.trim() || runtime.output?.trim(),
+                  );
+                  const processBorderTone = getProcessBorderTone(runtime.state, runtime.status);
+                  const processCardStyle = processBorderTone.color
+                    ? ({
+                        "--process-border-color": processBorderTone.color,
+                      } as React.CSSProperties)
+                    : undefined;
+
+                  return (
+                    <div
+                      key={process.key}
+                      className={`border border-border bg-background p-2 process-card-border ${
+                        processBorderTone.animated ? "process-card-border-animated" : ""
+                      }`}
+                      style={processCardStyle}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <p className="truncate text-xs font-medium text-foreground">{process.id}</p>
+                          {runtime.pid ? (
+                            <p className="truncate text-[10px] text-muted-foreground">PID: {runtime.pid}</p>
+                          ) : null}
+                        </div>
+                        <div className="flex items-center">
+                          <Button
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => {
+                              void handleSendProcessOutput(process);
+                            }}
+                            disabled={isStreaming || !hasProcessOutput}
+                            aria-label="Send process output as prompt"
+                            title="Send process output as prompt"
+                          >
+                            <SendHorizontal className="size-3" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => handleProcessClick(process)}
+                            aria-label="Jump to code block"
+                          >
+                            <ArrowUpRight />
+                          </Button>
+                          {!runtime.pid ? (
+                            <Button
+                              type="button"
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => { void handleCreateProcess(process); }}
+                              disabled={isBusy}
+                            >
+                              <Play className="size-3" />
+                            </Button>
+                          ) : runtime.state === "idle" ? (
+                            <Button
+                              type="button"
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => {
+                                void handleRunProcess(process, false);
+                              }}
+                              disabled={isBusy}
+                            >
+                              <RotateCw className="size-3" />
+                            </Button>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="icon-sm"
+                              variant="destructive"
+                              onClick={() => {
+                                void handleKillProcess(process);
+                              }}
+                              disabled={isBusy}
+                            >
+                              <Square className="size-3" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+
+                      {runtime.error ? (
+                        <p className="mt-1 text-[10px] text-destructive">{runtime.error}</p>
+                      ) : null}
                     </div>
-                  </Button>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
         </aside>
       </div>
+
+      {forceRunConfirm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-sm border border-border bg-card p-4 shadow-xl">
+            <p className="text-sm font-medium text-foreground">Force run required</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              This process already has output. Running with force will overwrite it.
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setForceRunConfirm(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => {
+                  void handleConfirmForceRun();
+                }}
+              >
+                Force run
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

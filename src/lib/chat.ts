@@ -5,19 +5,33 @@ export type ChatMessage = {
   content: string;
 };
 
+export type ProcessPromptContext = {
+  processId: string;
+  pid: string | null;
+  stdout: string | null;
+  stderr: string | null;
+  output: string | null;
+};
+
 export type StreamChatInput = {
   model: string;
   messages: ChatMessage[];
+  processContext?: ProcessPromptContext[];
   onToken: (token: string) => void;
 };
 
-export async function streamChat({ model, messages, onToken }: StreamChatInput) {
+export async function streamChat({
+  model,
+  messages,
+  processContext,
+  onToken,
+}: StreamChatInput) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model, messages }),
+    body: JSON.stringify({ model, messages, processContext }),
   });
 
   if (!response.ok) {
