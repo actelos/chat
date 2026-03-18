@@ -767,8 +767,7 @@ function App() {
       return;
     }
 
-    const pidLabel = runtime.pid ? ` (pid: ${runtime.pid})` : "";
-    const promptFromProcess = `Please analyze this process result for code block ${group.id}${pidLabel}.`;
+    const promptFromProcess = sections.join("\n\n");
 
     const processContext = [
       {
