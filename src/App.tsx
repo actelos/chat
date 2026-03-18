@@ -10,6 +10,7 @@ import {
 } from "@/lib/db";
 import {
   createProcess,
+  deleteProcess,
   listProcesses,
   getProcessArtifacts,
   killProcess,
@@ -51,7 +52,7 @@ function App() {
   const [customModel, setCustomModel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [processRuntimeByPid, setProcessRuntimeByPid] = useState<Record<string, ProcessRuntime>>(
+  const [processRuntimeByPid, setProcessRuntimeByPid] = useState<Record<number, ProcessRuntime>>(
     {},
   );
   const [processCreateStateByRef, setProcessCreateStateByRef] = useState<
@@ -87,7 +88,7 @@ function App() {
   }, [messages]);
 
   const updateProcessRuntime = useCallback(
-    (pid: string, updater: (previous: ProcessRuntime) => ProcessRuntime) => {
+    (pid: number, updater: (previous: ProcessRuntime) => ProcessRuntime) => {
       setProcessRuntimeByPid((previous) => {
         const current =
           previous[pid] ??
@@ -140,7 +141,7 @@ function App() {
   );
 
   const idlePidsToFetch = useMemo(() => {
-    const pids: string[] = [];
+    const pids: number[] = [];
 
     for (const list of Object.values(processesByRef)) {
       for (const process of list) {
@@ -158,10 +159,10 @@ function App() {
   }, [processRuntimeByPid, processesByRef]);
 
   const { data: swrArtifactsByPid, mutate: mutateArtifacts } = useSWR<
-    Record<string, MciProcessArtifacts | null>
+    Record<number, MciProcessArtifacts | null>
   >(
     idlePidsToFetch.length > 0 ? ["processArtifacts", idlePidsToFetch] : null,
-    async ([, pids]: readonly [string, string[]]) => {
+    async ([, pids]: readonly [string, number[]]) => {
       const results = await Promise.allSettled(
         pids.map(async (pid) => ({ pid, artifacts: await getProcessArtifacts(pid) })),
       );
@@ -170,7 +171,7 @@ function App() {
           pids[index],
           result.status === "fulfilled" ? result.value.artifacts : null,
         ]),
-      ) as Record<string, MciProcessArtifacts | null>;
+      ) as Record<number, MciProcessArtifacts | null>;
     },
     {
       revalidateOnFocus: false,
@@ -306,8 +307,8 @@ function App() {
 
     setProcessRuntimeByPid((previous) => {
       const next = Object.fromEntries(
-        Object.entries(previous).filter(([pid]) => activePids.has(pid)),
-      );
+        Object.entries(previous).filter(([pid]) => activePids.has(Number(pid))),
+      ) as Record<number, ProcessRuntime>;
 
       return next;
     });
@@ -335,16 +336,17 @@ function App() {
           continue;
         }
 
+        const pidValue = Number(pid);
         const current =
-          next[pid] ??
+          next[pidValue] ??
           createDefaultRuntime({
-            pid,
+            pid: pidValue,
             ref: null,
             state: "idle",
             status: null,
           });
 
-        next[pid] = {
+        next[pidValue] = {
           ...current,
           stdout: artifacts.stdout,
           stderr: artifacts.stderr,
@@ -363,7 +365,7 @@ function App() {
     overridePrompt?: string,
     processContext?: Array<{
       processId: string;
-      pid: string | null;
+      pid: number | null;
       stdout: string | null;
       stderr: string | null;
       output: string | null;
@@ -574,7 +576,7 @@ function App() {
     }
   }
 
-  async function handleRunProcess(pid: string, force: boolean) {
+  async function handleRunProcess(pid: number, force: boolean) {
     const runtime = processRuntimeByPid[pid];
 
     if (!runtime) {
@@ -633,7 +635,7 @@ function App() {
     }
   }
 
-  async function handleKillProcess(pid: string) {
+  async function handleKillProcess(pid: number) {
     const runtime = processRuntimeByPid[pid];
 
     if (!runtime) {
@@ -679,6 +681,56 @@ function App() {
     }
   }
 
+  async function handleDeleteProcess(pid: number) {
+    const runtime = processRuntimeByPid[pid];
+    if (!runtime) {
+      return;
+    }
+
+    updateProcessRuntime(pid, (previous) => ({
+      ...previous,
+      isSignaling: true,
+      error: null,
+    }));
+
+    try {
+      await deleteProcess(runtime.pid);
+
+      setProcessRuntimeByPid((previous) => {
+        const { [pid]: _, ...rest } = previous;
+        return rest;
+      });
+
+      setProcessesByRef((previous) => {
+        let changed = false;
+        const next = Object.fromEntries(
+          Object.entries(previous).map(([ref, list]) => {
+            const filtered = list.filter((process) => process.pid !== pid);
+            if (filtered.length !== list.length) {
+              changed = true;
+            }
+            return [ref, filtered];
+          }),
+        ) as Record<string, MciProcess[]>;
+
+        return changed ? next : previous;
+      });
+
+      void mutateProcessesByRef();
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to delete process.";
+
+      updateProcessRuntime(pid, (previous) => ({
+        ...previous,
+        isSignaling: false,
+        error: message,
+      }));
+    }
+  }
+
   async function handleConfirmForceRun() {
     if (!forceRunConfirm) {
       return;
@@ -688,7 +740,7 @@ function App() {
     await handleRunProcess(forceRunConfirm.pid, true);
   }
 
-  async function handleSendProcessOutput(pid: string, group: CodeBlockGroup) {
+  async function handleSendProcessOutput(pid: number, group: CodeBlockGroup) {
     if (isStreaming) {
       return;
     }
@@ -783,6 +835,9 @@ function App() {
           }}
           onKillProcess={(pid) => {
             void handleKillProcess(pid);
+          }}
+          onDeleteProcess={(pid) => {
+            void handleDeleteProcess(pid);
           }}
         />
       </div>

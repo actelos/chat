@@ -7,7 +7,7 @@ export type ChatMessage = {
 
 export type ProcessPromptContext = {
   processId: string;
-  pid: string | null;
+  pid: number | null;
   stdout: string | null;
   stderr: string | null;
   output: string | null;

@@ -16,7 +16,7 @@ export type CodeBlockGroup = {
 };
 
 export type ProcessRuntime = {
-  pid: string;
+  pid: number;
   ref: string | null;
   state: MciProcessState | null;
   status: MciProcessStatus;
@@ -34,7 +34,7 @@ export type ProcessCreateState = {
 };
 
 export type ForceRunConfirm = {
-  pid: string;
+  pid: number;
 };
 
 export type ProcessBorderTone = {

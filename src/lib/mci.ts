@@ -14,7 +14,7 @@ export type MciProcessState = "queued" | "running" | "idle";
 export type MciProcessStatus = "success" | "failed" | "canceled" | null;
 
 export type MciProcess = {
-  pid: string;
+  pid: number;
   state: MciProcessState;
   status: MciProcessStatus;
   ref?: string;
@@ -130,8 +130,29 @@ async function requestText(path: string, init?: RequestInit): Promise<string> {
   }
 }
 
-export async function createProcess(code: string, ref?: string): Promise<{ pid: string }> {
-  return requestJson<{ pid: string }>("/processes", {
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const { init: requestInit, cleanup } = withTimeout(init);
+
+  try {
+    const response = await fetch(buildMciUrl(path), requestInit);
+
+    if (!response.ok) {
+      const message = await parseErrorMessage(response);
+      throw new MciApiError(message, response.status);
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("MCI request timed out.");
+    }
+
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
+
+export async function createProcess(code: string, ref?: string): Promise<{ pid: number }> {
+  return requestJson<{ pid: number }>("/processes", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -178,29 +199,29 @@ export async function listProcesses(params?: {
   return [];
 }
 
-export async function getProcess(pid: string): Promise<MciProcess> {
-  return requestJson<MciProcess>(`/processes/${encodeURIComponent(pid)}`);
+export async function getProcess(pid: number): Promise<MciProcess> {
+  return requestJson<MciProcess>(`/processes/${encodeURIComponent(String(pid))}`);
 }
 
-export async function getProcessOutput(pid: string): Promise<unknown | null> {
+export async function getProcessOutput(pid: number): Promise<unknown | null> {
   const parsed = await requestJson<{ output?: unknown }>(
-    `/processes/${encodeURIComponent(pid)}/output`,
+    `/processes/${encodeURIComponent(String(pid))}/output`,
   );
 
   return parsed.output ?? null;
 }
 
-export async function getProcessStdout(pid: string): Promise<string | null> {
-  const stdout = await requestText(`/processes/${encodeURIComponent(pid)}/stdout`);
+export async function getProcessStdout(pid: number): Promise<string | null> {
+  const stdout = await requestText(`/processes/${encodeURIComponent(String(pid))}/stdout`);
   return stdout.length > 0 ? stdout : null;
 }
 
-export async function getProcessStderr(pid: string): Promise<string | null> {
-  const stderr = await requestText(`/processes/${encodeURIComponent(pid)}/stderr`);
+export async function getProcessStderr(pid: number): Promise<string | null> {
+  const stderr = await requestText(`/processes/${encodeURIComponent(String(pid))}/stderr`);
   return stderr.length > 0 ? stderr : null;
 }
 
-export async function getProcessArtifacts(pid: string): Promise<MciProcessArtifacts> {
+export async function getProcessArtifacts(pid: number): Promise<MciProcessArtifacts> {
   const [output, stdout, stderr] = await Promise.all([
     getProcessOutput(pid),
     getProcessStdout(pid),
@@ -214,22 +235,37 @@ export async function getProcessArtifacts(pid: string): Promise<MciProcessArtifa
   };
 }
 
-export async function killProcess(pid: string): Promise<MciProcess> {
-  return requestJson<MciProcess>(`/processes/${encodeURIComponent(pid)}/signals/kill`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+export async function killProcess(pid: number): Promise<MciProcess> {
+  return requestJson<MciProcess>(
+    `/processes/${encodeURIComponent(String(pid))}/signals/kill`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: "{}",
     },
-    body: "{}",
-  });
+  );
 }
 
-export async function runProcess(pid: string, force = false): Promise<MciProcess> {
-  return requestJson<MciProcess>(`/processes/${encodeURIComponent(pid)}/signals/run`, {
-    method: "POST",
+export async function runProcess(pid: number, force = false): Promise<MciProcess> {
+  return requestJson<MciProcess>(
+    `/processes/${encodeURIComponent(String(pid))}/signals/run`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ force }),
+    },
+  );
+}
+
+export async function deleteProcess(pid: number): Promise<void> {
+  await requestVoid(`/processes/${encodeURIComponent(String(pid))}`, {
+    method: "DELETE",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ force }),
   });
 }

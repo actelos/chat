@@ -23,7 +23,7 @@ export function createDefaultRuntime({
   state = null,
   status = null,
 }: {
-  pid: string;
+  pid: number;
   ref?: string | null;
   state?: MciProcessState | null;
   status?: MciProcessStatus;

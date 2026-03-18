@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { ArrowUpRight, Play, RotateCw, SendHorizontal, Square } from "lucide-react";
+import { ArrowUpRight, Play, RotateCw, SendHorizontal, Square, Trash2 } from "lucide-react";
 import type { MciProcess } from "@/lib/mci";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,14 +13,15 @@ type ProcessPanelProps = {
   codeBlockGroups: CodeBlockGroup[];
   processesByRef: Record<string, MciProcess[]>;
   processCreateStateByRef: Record<string, ProcessCreateState>;
-  processRuntimeByPid: Record<string, ProcessRuntime>;
+  processRuntimeByPid: Record<number, ProcessRuntime>;
   isStreaming: boolean;
   mciServerUrl: string;
   onProcessClick: (group: CodeBlockGroup) => void;
   onCreateProcess: (group: CodeBlockGroup) => void;
-  onSendProcessOutput: (pid: string, group: CodeBlockGroup) => void;
-  onRunProcess: (pid: string) => void;
-  onKillProcess: (pid: string) => void;
+  onSendProcessOutput: (pid: number, group: CodeBlockGroup) => void;
+  onRunProcess: (pid: number) => void;
+  onKillProcess: (pid: number) => void;
+  onDeleteProcess: (pid: number) => void;
 };
 
 export function ProcessPanel({
@@ -35,6 +36,7 @@ export function ProcessPanel({
   onSendProcessOutput,
   onRunProcess,
   onKillProcess,
+  onDeleteProcess,
 }: ProcessPanelProps) {
   const processCount = Object.values(processesByRef).reduce(
     (sum, list) => sum + list.length,
@@ -171,6 +173,17 @@ export function ProcessPanel({
                                     <Square className="size-3" />
                                   </Button>
                                 )}
+                                <Button
+                                  type="button"
+                                  size="icon-sm"
+                                  variant="ghost"
+                                  onClick={() => onDeleteProcess(process.pid)}
+                                  disabled={isBusy}
+                                  aria-label="Delete process"
+                                  title="Delete process"
+                                >
+                                  <Trash2 className="size-3" />
+                                </Button>
                               </div>
                             </div>
 
