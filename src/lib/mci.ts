@@ -8,6 +8,8 @@ const resolvedServerUrl =
 
 export const mciServerUrl = resolvedServerUrl.replace(/\/+$/, "");
 
+const MCI_TIMEOUT_MS = 15_000;
+
 export type MciProcessState = "queued" | "running" | "idle";
 export type MciProcessStatus = "success" | "failed" | "canceled" | null;
 
@@ -15,6 +17,7 @@ export type MciProcess = {
   pid: string;
   state: MciProcessState;
   status: MciProcessStatus;
+  ref?: string;
 };
 
 export type MciProcessArtifacts = {
@@ -35,6 +38,30 @@ export class MciApiError extends Error {
 
 function buildMciUrl(path: string): string {
   return `${mciServerUrl}${path}`;
+}
+
+function withTimeout(init?: RequestInit): { init: RequestInit; cleanup: () => void } {
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), MCI_TIMEOUT_MS);
+  const cleanup = () => globalThis.clearTimeout(timer);
+
+  if (init?.signal) {
+    init.signal.addEventListener(
+      "abort",
+      () => {
+        controller.abort();
+      },
+      { once: true },
+    );
+  }
+
+  return {
+    init: {
+      ...init,
+      signal: controller.signal,
+    },
+    cleanup,
+  };
 }
 
 async function parseErrorMessage(response: Response): Promise<string> {
@@ -58,35 +85,97 @@ async function parseErrorMessage(response: Response): Promise<string> {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(buildMciUrl(path), init);
+  const { init: requestInit, cleanup } = withTimeout(init);
 
-  if (!response.ok) {
-    const message = await parseErrorMessage(response);
-    throw new MciApiError(message, response.status);
+  try {
+    const response = await fetch(buildMciUrl(path), requestInit);
+
+    if (!response.ok) {
+      const message = await parseErrorMessage(response);
+      throw new MciApiError(message, response.status);
+    }
+
+    return (await response.json()) as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("MCI request timed out.");
+    }
+
+    throw error;
+  } finally {
+    cleanup();
   }
-
-  return (await response.json()) as T;
 }
 
 async function requestText(path: string, init?: RequestInit): Promise<string> {
-  const response = await fetch(buildMciUrl(path), init);
+  const { init: requestInit, cleanup } = withTimeout(init);
 
-  if (!response.ok) {
-    const message = await parseErrorMessage(response);
-    throw new MciApiError(message, response.status);
+  try {
+    const response = await fetch(buildMciUrl(path), requestInit);
+
+    if (!response.ok) {
+      const message = await parseErrorMessage(response);
+      throw new MciApiError(message, response.status);
+    }
+
+    return response.text();
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("MCI request timed out.");
+    }
+
+    throw error;
+  } finally {
+    cleanup();
   }
-
-  return response.text();
 }
 
-export async function createProcess(code: string): Promise<{ pid: string }> {
+export async function createProcess(code: string, ref?: string): Promise<{ pid: string }> {
   return requestJson<{ pid: string }>("/processes", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ code }),
+    body: JSON.stringify(ref ? { code, ref } : { code }),
   });
+}
+
+export async function listProcesses(params?: {
+  ref?: string;
+  state?: MciProcessState;
+  status?: MciProcessStatus;
+}): Promise<MciProcess[]> {
+  const search = new URLSearchParams();
+
+  if (params?.ref) {
+    search.set("ref", params.ref);
+  }
+
+  if (params?.state) {
+    search.set("state", params.state);
+  }
+
+  if (typeof params?.status === "string") {
+    search.set("status", params.status);
+  }
+
+  const suffix = search.toString();
+  const path = suffix.length > 0 ? `/processes?${suffix}` : "/processes";
+
+  const payload = await requestJson<unknown>(path);
+
+  if (Array.isArray(payload)) {
+    return payload as MciProcess[];
+  }
+
+  if (payload && typeof payload === "object") {
+    const record = payload as { processes?: unknown };
+    if (Array.isArray(record.processes)) {
+      return record.processes as MciProcess[];
+    }
+  }
+
+  return [];
 }
 
 export async function getProcess(pid: string): Promise<MciProcess> {
