@@ -69,7 +69,7 @@ export function getProcessBorderTone(
     return { color: "var(--muted-foreground)", animated: false };
   }
 
-  if (state === "running") {
+  if (state === "running" || state === "terminating") {
     return { color: "oklch(0.707 0.165 254.624)", animated: true };
   }
 
