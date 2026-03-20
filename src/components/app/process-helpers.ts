@@ -57,6 +57,10 @@ export function getProcessBorderTone(
     return { color: "var(--destructive)", animated: false };
   }
 
+  if (status === "timeout") {
+    return { color: "var(--destructive)", animated: false };
+  }
+
   if (status === "success") {
     return { color: "oklch(0.768 0.148 163.223)", animated: false };
   }

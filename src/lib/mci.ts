@@ -11,7 +11,7 @@ export const mciServerUrl = resolvedServerUrl.replace(/\/+$/, "");
 const MCI_TIMEOUT_MS = 15_000;
 
 export type MciProcessState = "queued" | "running" | "idle";
-export type MciProcessStatus = "success" | "failed" | "canceled" | null;
+export type MciProcessStatus = "success" | "failed" | "canceled" | "timeout" | null;
 
 export type MciProcess = {
   pid: number;
