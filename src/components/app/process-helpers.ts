@@ -1,5 +1,9 @@
 import type { MciProcessState, MciProcessStatus } from "@/lib/mci";
-import type { ProcessBorderTone, ProcessCreateState, ProcessRuntime } from "./types";
+import type {
+  ProcessBorderTone,
+  ProcessCreateState,
+  ProcessRuntime,
+} from "./types";
 
 export function stringifyProcessOutput(value: unknown): string | null {
   if (value === null || typeof value === "undefined") {
@@ -58,7 +62,7 @@ export function getProcessBorderTone(
   }
 
   if (status === "timeout") {
-    return { color: "var(--destructive)", animated: false };
+    return { color: "oklch(0.829 0.161 83.813)", animated: false };
   }
 
   if (status === "success") {
@@ -69,8 +73,12 @@ export function getProcessBorderTone(
     return { color: "var(--muted-foreground)", animated: false };
   }
 
-  if (state === "running" || state === "terminating") {
+  if (state === "running") {
     return { color: "oklch(0.707 0.165 254.624)", animated: true };
+  }
+
+  if (state === "terminating") {
+    return { color: "var(--destructive)", animated: true };
   }
 
   if (state === "queued") {
